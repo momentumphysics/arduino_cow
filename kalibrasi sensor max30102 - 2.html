@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAX30102 Buffered Monitor & Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #f4f6f9; margin: 0; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; background: #fff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #2c3e50; margin-bottom: 5px; }
+        .subtitle { text-align: center; color: #7f8c8d; margin-bottom: 25px; font-size: 14px; }
+        
+        .control-panel { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+            gap: 20px; 
+            background: #f8f9fa; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin-bottom: 20px; 
+            border: 1px solid #e2e8f0;
+        }
+        .panel-section { display: flex; flex-direction: column; gap: 10px; }
+        .panel-section h4 { margin: 0 0 5px 0; color: #34495e; border-bottom: 2px solid #cbd5e1; padding-bottom: 5px; }
+        
+        .input-group { display: flex; align-items: center; gap: 10px; }
+        input[type="text"] { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 4px; flex: 1; }
+        input[type="file"] { padding: 5px 0; font-size: 13px; }
+        
+        .button-group { display: flex; flex-wrap: wrap; gap: 8px; }
+        button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: all 0.2s; }
+        
+        .btn-start { background-color: #2ecc71; color: white; }
+        .btn-start:hover { background-color: #27ae60; }
+        .btn-stop { background-color: #e74c3c; color: white; }
+        .btn-stop:hover { background-color: #c0392b; }
+        .btn-download { background-color: #3498db; color: white; }
+        .btn-download:hover { background-color: #2980b9; }
+        .btn-clear { background-color: #95a5a6; color: white; }
+        .btn-clear:hover { background-color: #7f8c8d; }
+
+        .status-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 25px; }
+        .card { background: #f1f2f6; padding: 15px; border-radius: 8px; text-align: center; border-left: 5px solid #34495e; }
+        .card.ir { border-left-color: #e74c3c; }
+        .card.red { border-left-color: #3498db; }
+        .card.bpm { border-left-color: #9b59b6; background: #fdf7ff; }
+        .card h3 { margin: 0 0 10px 0; font-size: 13px; color: #7f8c8d; text-transform: uppercase; }
+        .card div { font-size: 24px; font-weight: bold; }
+        .card.bpm div { color: #9b59b6; font-size: 32px; }
+        
+        .chart-container { position: relative; height: 420px; width: 100%; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>MAX30102 Data Hub</h1>
+    <div class="subtitle">Sistem Monitoring Real-time & Analisis File Eksternal</div>
+
+    <div class="control-panel">
+        <div class="panel-section">
+            <h4>1. Mode Real-time (ESP32)</h4>
+            <div class="input-group">
+                <label for="espIp">IP ESP32:</label>
+                <input type="text" id="espIp" value="192.168.18.15">
+            </div>
+            <div class="button-group">
+                <button id="btnToggle" class="btn-start" onclick="togglePolling()">Mulai Logging</button>
+                <button class="btn-clear" onclick="clearData()">Reset</button>
+                <button class="btn-download" onclick="downloadJSON()">Unduh JSON</button>
+            </div>
+        </div>
+
+        <div class="panel-section">
+            <h4>2. Mode Analisis File Offline</h4>
+            <div class="input-group">
+                <input type="file" id="jsonFileInput" accept=".json" onchange="analyzeJSONFile(event)">
+            </div>
+            <div style="font-size: 12px; color: #7f8c8d; margin-top: 5px;">
+                * Upload file <code style="background:#e2e8f0; padding:2px 4px; border-radius:3px;">.json</code> hasil unduhan sebelumnya untuk melihat grafik riwayat & hitung ulang BPM.
+            </div>
+        </div>
+    </div>
+
+    <div class="status-cards">
+        <div class="card ir">
+            <h3>IR Raw</h3>
+            <div id="valIR">0</div>
+        </div>
+        <div class="card red">
+            <h3>RED Raw</h3>
+            <div id="valRED">0</div>
+        </div>
+        <div class="card">
+            <h3>Total Sampel</h3>
+            <div id="valCount">0</div>
+        </div>
+        <div class="card bpm">
+            <h3>Hasil Detak Jantung</h3>
+            <div id="valBPM">-- BPM</div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="realtimeChart"></canvas>
+    </div>
+</div>
+
+<script>
+    let pollingInterval = null;
+    let isPolling = false;
+    let loggedData = []; 
+    
+    const MAX_GRAPH_POINTS = 200; // Batasan tampilan saat streaming real-time
+    const FETCH_INTERVAL_MS = 1000; 
+
+    const ctx = document.getElementById('realtimeChart').getContext('2d');
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                { label: 'IR Raw', data: [], borderColor: '#e74c3c', borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                { label: 'RED Raw', data: [], borderColor: '#3498db', borderWidth: 2, pointRadius: 0, tension: 0.1 }
+            ]
+        },
+        options: { responsive: true, maintainAspectRatio: false, animation: false }
+    });
+
+    // ----------------------------------------------------
+    // ALUR MODE REAL-TIME (DARI ESP32 CHUNK)
+    // ----------------------------------------------------
+    async function fetchData() {
+        const ip = document.getElementById('espIp').value.trim();
+        if(!ip) return;
+
+        try {
+            const response = await fetch(`http://${ip}/api/data`);
+            if (!response.ok) throw new Error('Network error');
+            const data = await response.json();
+            
+            if (data.samples && data.samples.length > 0) {
+                data.samples.forEach((sample) => {
+                    const timestamp = new Date().toISOString();
+                    loggedData.push({ timestamp, ir: sample.ir, red: sample.red });
+
+                    chart.data.labels.push(""); 
+                    chart.data.datasets[0].data.push(sample.ir);
+                    chart.data.datasets[1].data.push(sample.red);
+
+                    if (chart.data.labels.length > MAX_GRAPH_POINTS) {
+                        chart.data.labels.shift();
+                        chart.data.datasets[0].data.shift();
+                        chart.data.datasets[1].data.shift();
+                    }
+                });
+
+                const lastIdx = data.samples.length - 1;
+                document.getElementById('valIR').innerText = data.samples[lastIdx].ir;
+                document.getElementById('valRED').innerText = data.samples[lastIdx].red;
+                document.getElementById('valCount').innerText = loggedData.length;
+                chart.update();
+            }
+        } catch (error) {
+            console.error("Fetch error:", error);
+        }
+    }
+
+    function togglePolling() {
+        const btn = document.getElementById('btnToggle');
+        if (isPolling) {
+            clearInterval(pollingInterval);
+            isPolling = false;
+            btn.innerText = "Mulai Logging";
+            btn.className = "btn-start";
+            calculateBPM(); 
+        } else {
+            clearData();
+            // Reset input file jika sedang melakukan streaming baru
+            document.getElementById('jsonFileInput').value = "";
+            isPolling = true;
+            btn.innerText = "Berhenti";
+            btn.className = "btn-stop";
+            pollingInterval = setInterval(fetchData, FETCH_INTERVAL_MS);
+        }
+    }
+
+    // ----------------------------------------------------
+    // FITUR BARU: SEKSI ANALISIS OFFLINE FILE JSON
+    // ----------------------------------------------------
+    function analyzeJSONFile(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        // Jika sedang logging real-time, matikan dulu
+        if (isPolling) togglePolling();
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const parsedData = JSON.parse(e.target.result);
+                
+                if (!Array.isArray(parsedData) || parsedData.length === 0) {
+                    throw new Error("Struktur file JSON harus berupa Array data yang valid.");
+                }
+
+                // Bersihkan data lama di memori website
+                clearData();
+                loggedData = parsedData;
+
+                // Masukkan SELURUH data file ke dalam grafik (tanpa memotong titik)
+                chart.data.labels = loggedData.map((d, index) => {
+                    return d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : index;
+                });
+                chart.data.datasets[0].data = loggedData.map(d => d.ir);
+                chart.data.datasets[1].data = loggedData.map(d => d.red);
+
+                // Update Info Tampilan Angka (berdasarkan sampel terakhir di file)
+                const lastIdx = loggedData.length - 1;
+                document.getElementById('valIR').innerText = loggedData[lastIdx].ir || 0;
+                document.getElementById('valRED').innerText = loggedData[lastIdx].red || 0;
+                document.getElementById('valCount').innerText = loggedData.length;
+
+                // Refresh grafik
+                chart.update();
+
+                // Jalankan Kalkulasi BPM dari file tersebut
+                calculateBPM();
+
+            } catch (err) {
+                alert("Kesalahan Membaca File: " + err.message);
+                console.error(err);
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    // ----------------------------------------------------
+    // ALGORITMA STATISTIK HITUNG BPM
+    // ----------------------------------------------------
+    function calculateBPM() {
+    if (loggedData.length < 100) {
+        document.getElementById('valBPM').innerText = "Data Kurang";
+        return;
+    }
+
+    // 1. HITUNG SAMPLING RATE SECARA OTOMATIS (ADAPTIF)
+    const startTime = new Date(loggedData[0].timestamp);
+    const endTime = new Date(loggedData[loggedData.length - 1].timestamp);
+    const totalDurationSeconds = (endTime - startTime) / 1000;
+
+    // Jika durasi tidak valid atau terlalu singkat, gunakan fallback 20Hz
+    let actualSamplingRate = loggedData.length / totalDurationSeconds;
+    if (totalDurationSeconds <= 0 || isNaN(actualSamplingRate)) {
+        actualSamplingRate = 20; 
+    }
+
+    console.log(`Terdeteksi Sampling Rate Riil: ${actualSamplingRate.toFixed(2)} Hz`);
+
+    let irValues = loggedData.map(d => d.ir);
+    
+    // 2. DC Removal Filter (Disesuaikan dengan sampling rate)
+    let windowSize = Math.round(actualSamplingRate * 0.2); // Window dinamis (20% dari Frekuensi)
+    let acValues = [];
+    for (let i = 0; i < irValues.length; i++) {
+        let start = Math.max(0, i - windowSize);
+        let end = Math.min(irValues.length, i + windowSize);
+        let sum = 0;
+        for (let j = start; j < end; j++) sum += irValues[j];
+        acValues.push(irValues[i] - (sum / (end - start)));
+    }
+
+    // 3. Peak Detection Dinamis
+    let peaks = [];
+    // Batasan aman jarak antar detak (Asumsi batas max jantung manusia normal 160 BPM = 2.6 Hz)
+    let minSamplesBetweenPeaks = Math.round(actualSamplingRate / 2.6); 
+    
+    let maxAC = Math.max(...acValues);
+    let minAC = Math.min(...acValues);
+    let threshold = (maxAC - minAC) * 0.15; // Threshold 15% dari amplitudo gelombang
+
+    for (let i = 1; i < acValues.length - 1; i++) {
+        if (acValues[i] > acValues[i-1] && acValues[i] > acValues[i+1]) {
+            if (acValues[i] > threshold) {
+                if (peaks.length === 0 || (i - peaks[peaks.length - 1]) > minSamplesBetweenPeaks) {
+                    peaks.push(i);
+                }
+            }
+        }
+    }
+
+    if (peaks.length < 3) {
+        document.getElementById('valBPM').innerText = "Noise / Gagal";
+        return;
+    }
+
+    // 4. Konversi Sampel Interval ke BPM Berdasarkan Frekuensi Riil
+    let totalIntervalSamples = 0;
+    for (let i = 1; i < peaks.length; i++) {
+        totalIntervalSamples += (peaks[i] - peaks[i-1]);
+    }
+    
+    let avgIntervalSamples = totalIntervalSamples / (peaks.length - 1);
+    
+    // Rumus Adaptif: Nilai detik per sampel didapat dari (1 / Frekuensi Riil)
+    let avgIntervalSeconds = avgIntervalSamples * (1 / actualSamplingRate); 
+    let bpm = 60 / avgIntervalSeconds;
+
+    if (bpm >= 45 && bpm <= 160) {
+        document.getElementById('valBPM').innerText = Math.round(bpm) + " BPM";
+    } else {
+        document.getElementById('valBPM').innerText = "Data Noise";
+    }
+}
+
+    function clearData() {
+        loggedData = [];
+        document.getElementById('valCount').innerText = "0";
+        document.getElementById('valIR').innerText = "0";
+        document.getElementById('valRED').innerText = "0";
+        document.getElementById('valBPM').innerText = "-- BPM";
+        chart.data.labels = [];
+        chart.data.datasets[0].data = [];
+        chart.data.datasets[1].data = [];
+        chart.update();
+    }
+
+    function downloadJSON() {
+        if (loggedData.length === 0) return alert("Data kosong!");
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(loggedData, null, 2));
+        const downloadAnchor = document.createElement('a');
+        downloadAnchor.setAttribute("href", dataStr);
+        downloadAnchor.setAttribute("download", `max30102_data_${Date.now()}.json`);
+        document.body.appendChild(downloadAnchor);
+        downloadAnchor.click();
+        downloadAnchor.remove();
+    }
+</script>
+</body>
+</html>
